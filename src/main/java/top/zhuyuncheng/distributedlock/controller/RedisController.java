@@ -18,44 +18,6 @@ public class RedisController {
     int i = 1;
     boolean flag = false;
 
-    @GetMapping("/test3")
-    public void test3() {
-        DistributedLock lock = new RedisLock(redisTemplate, "ABKEY", 1000, 2000);
-        lock.unlock();
-
-        new Thread(() -> {
-            try {
-                if (lock.lock()) {
-                    System.out.println("locked...");
-                }
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            } finally {
-                lock.unlock();
-            }
-        }).start();
-    }
-
-    @GetMapping("/test2")
-    public void test2(@RequestParam("time") long time) {
-        DistributedLock lock = new RedisLock(redisTemplate, "ABKEY", 1000, 2000);
-
-        for (int count = 10; count > 0; count--) {
-            new Thread(() -> {
-                try {
-                    if (lock.lock()) {
-                        System.out.println("locked...");
-                        Thread.sleep(time);
-                    }
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                } finally {
-                    lock.unlock();
-                }
-            }).start();
-        }
-    }
-
     @GetMapping
     public void test() {
         this.i = 1;
