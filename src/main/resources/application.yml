@@ -11,4 +11,5 @@ spring:
         max-wait: -1ms
         max-idle: 8
         min-idle: 0
-
+zk:
+  url: 127.0.0.1:2181
