@@ -356,3 +356,10 @@ public class ZKLock implements DistributedLock {
 > - 基于数据库创建的分布式锁，受限于数据库的性能，而且数据库要避免单点部署；没有锁失效机制，可能会造成死锁，但是实现简单，不需要过多的依赖
 > - Redis有很高的性能；对命令支持的也很好，实现起来相对比较方便
 > - 具备高可用、可重入、阻塞锁特性，可解决失效死锁问题, 但是要维护zk集群，需要频繁的创建和删除节点
+
+## 最后骗一波关注
+
+请扫码或搜索"小疯子呵呵哒"关注我的个人微信订阅号
+<div align=center>
+  <img src="https://zhuyuncheng.top/assets/weChatQRCode/2.jpeg" width = "500"/>
+</div>
