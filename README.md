@@ -77,31 +77,52 @@ DELETE FROM task_lock WHERE task_name = 'task_lock_01'
 ### Redis用到的命令解析 
 
 1) **SETNX** : 将 key 的值设为 value ，当且仅当 key 不存在。若给定的 key 已经存在，则 SETNX 不做任何动作
+
     ```bash
     127.0.0.1:6379> setNX key value
     ```
+
     **返回值**:
     - 1: 成功
     - 0: 失败
 
 2) **getSET** : 将给定 key 的值设为 value ，并返回 key 的旧值(old value)。当 key 存在但不是字符串类型时，返回一个错误。 
+
     ```bash
     127.0.0.1:6379> GETSET key value
     ```    
     
 3) **get** : 当 key 不存在时，返回 nil ，否则，返回 key 的值。如果 key 不是字符串类型，那么返回一个错误
+
     ```bash
     127.0.0.1:6379> GET key
     ```
+
 4) **del** : 删除指定的key
+
     ```bash
     127.0.0.1:6379> del key
     ```
+
+6) **ttl**: 获取key的超时时间: 如果未设置超时时间返回-1; 如果key不存在或因为超时已经删除返回-2; 如果key存在且已设置超时时间则返回剩余的时间，单位为second
+
+    ```bash
+    127.0.0.1:6379> ttl key
+    ```
+        
 ### 避免死锁
 
 > 当有一个线程得到锁之后，执行任务的过程中未释放锁，或者直接宕机了，这个时候我们需要引入锁超时的机制，来避免死锁的发生
 
-我们可以通过锁的键对应的时间戳来判断这种情况是否发生了，如果当前的时间已经大于该值，说明该锁已失效，可以被重新使用
+通过 `SET key value [expiration EX seconds|PX milliseconds] [NX|XX]`命令加锁，并且设置锁的过期时间，例如：`set key value  PX 3000 NX`
+
+### 释放锁
+
+> 不能直接通过del释放锁，首先要判断是否为自己的锁，然后才可以释放, 通过执行lua脚本的方式，保证在原子操作内释放锁
+```lua
+if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end
+
+```
 
 ### 代码实现
 
@@ -109,26 +130,21 @@ DELETE FROM task_lock WHERE task_name = 'task_lock_01'
 package top.zhuyuncheng.distributedlock.lock;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.connection.RedisStringCommands;
+import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.types.Expiration;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import java.util.Objects;
-import java.util.Optional;
 
 @Slf4j
-public class RedisLock implements DistributedLock {
+public class RedisLock {
 
     private RedisTemplate redisTemplate;
 
     private static final int DEFAULT_ACQUIRY_RESOLUTION_MILLIS = 100;
-
-    private volatile boolean locked = false;
-
-    /**
-     * Lock key
-     */
-    private String lockKey;
 
     /**
      * 锁超时时间，防止线程在入锁以后，无限的执行等待
@@ -140,49 +156,26 @@ public class RedisLock implements DistributedLock {
      */
     private int timeoutMSECs = 10 * 1000;
 
-    public RedisLock(RedisTemplate redisTemplate, String lockKey) {
+    public RedisLock(RedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
-        this.lockKey = lockKey + "_lock";
     }
 
-    public RedisLock(RedisTemplate redisTemplate, String lockKey, int expireMSECs) {
-        this(redisTemplate, lockKey);
+    public RedisLock(RedisTemplate redisTemplate, int expireMSECs) {
+        this(redisTemplate);
         this.expireMSECs = expireMSECs;
     }
 
-    public RedisLock(RedisTemplate redisTemplate, String lockKey, int expireMSECs, int timeoutMSECs) {
-        this(redisTemplate, lockKey, expireMSECs);
+    public RedisLock(RedisTemplate redisTemplate, int expireMSECs, int timeoutMSECs) {
+        this(redisTemplate, expireMSECs);
         this.timeoutMSECs = timeoutMSECs;
     }
 
-    /**
-     * @return lockKey
-     */
-    public String getLockKey() {
-        return lockKey;
-    }
-
-    private String get(String key) {
-        String value = null;
-        try {
-            value = (String) redisTemplate.execute((RedisCallback) conn -> {
-                StringRedisSerializer serializer = new StringRedisSerializer();
-                byte[] data = conn.get(Objects.requireNonNull(serializer.serialize(key)));
-                conn.close();
-                return Optional.ofNullable(data).map(serializer::deserialize).orElse(null);
-            });
-        } catch (Exception e) {
-            log.error("get redis error, key : {}, error: {}", key, e.getMessage());
-        }
-        return value;
-    }
-
-    private boolean setNX(String key, String value) {
+    private boolean set(String key, String value, long seconds) {
         Boolean result = null;
         try {
-            result = (Boolean) redisTemplate.execute((RedisCallback) conn -> {
+            result = (boolean) redisTemplate.execute((RedisCallback) conn -> {
                 StringRedisSerializer serializer = new StringRedisSerializer();
-                Boolean success = conn.setNX(Objects.requireNonNull(serializer.serialize(key)), Objects.requireNonNull(serializer.serialize(value)));
+                Boolean success = conn.set(Objects.requireNonNull(serializer.serialize(key)), Objects.requireNonNull(serializer.serialize(value)), Expiration.milliseconds(seconds), RedisStringCommands.SetOption.SET_IF_ABSENT);
                 conn.close();
                 return success;
             });
@@ -192,67 +185,26 @@ public class RedisLock implements DistributedLock {
         return result != null && result;
     }
 
-    private String getSet(String key, String value) {
-        String oldValue = null;
-        try {
-            oldValue = (String) redisTemplate.execute((RedisCallback) conn -> {
-                StringRedisSerializer serializer = new StringRedisSerializer();
-                byte[] data = conn.getSet(Objects.requireNonNull(serializer.serialize(key)), Objects.requireNonNull(serializer.serialize(value)));
-
-                return Optional.ofNullable(data).map(serializer::deserialize).get();
-            });
-        } catch (Exception e) {
-            log.error("getSet redis error, key: {}, error: {}", key, e.getMessage());
-        }
-        return oldValue;
-    }
-
-    @Override
-    public synchronized boolean lock() throws InterruptedException {
+    public synchronized boolean lock(String key, String value) throws InterruptedException {
 
         for (long timeout = timeoutMSECs; timeout > 0; timeout -= DEFAULT_ACQUIRY_RESOLUTION_MILLIS) {
-            long expires = System.currentTimeMillis() + expireMSECs + 1;
-            String expiresStr = String.valueOf(expires);
-            if (this.setNX(this.lockKey, expiresStr)) {
+            if (this.set(key, value, expireMSECs)) {
                 // lock acquired
-                locked = true;
                 return true;
             }
 
-            String currentExpiresStr = this.get(lockKey); // redis里的时间
-            if (currentExpiresStr != null && Long.parseLong(currentExpiresStr) < System.currentTimeMillis()) { // 锁超时
-
-                String oldValueStr = getSet(lockKey, expiresStr);
-
-                // 获取上一个锁到期时间，并设置现在的锁到期时间，
-                // 只有一个线程才能获取上一个线上的设置时间，因为jedis.getSet是同步的
-                if (oldValueStr != null && oldValueStr.equals(currentExpiresStr)) {
-                    // 防止误删（覆盖，因为key是相同的）了他人的锁——这里达不到效果，这里值会被覆盖，但是因为什么相差了很少的时间，所以可以接受
-
-                    // [分布式的情况下]:如过这个时候，多个线程恰好都到了这里，但是只有一个线程的设置值和当前值相同，他才有权利获取锁
-                    // lock acquired
-                    locked = true;
-                    return true;
-                }
-            }
-
-            /*
-             *   延迟100 毫秒,  这里使用随机时间可能会好一点,可以防止饥饿进程的出现,即,当同时到达多个进程,
-             *   只会有一个进程获得锁,其他的都用同样的频率进行尝试,后面有来了一些进程,也以同样的频率申请锁,这将可能导致前面来的锁得不到满足.
-             *   使用随机的等待时间可以一定程度上保证公平性
-             */
             Thread.sleep(DEFAULT_ACQUIRY_RESOLUTION_MILLIS);
         }
 
         return false;
     }
 
-    @Override
-    public synchronized void unlock() {
-        if (locked) {
-            redisTemplate.delete(lockKey);
-            locked = false;
-        }
+    public synchronized boolean unlock(String lockKey, String value) {
+        return (boolean) redisTemplate.execute((RedisCallback) conn -> {
+            String script = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+            Boolean result = conn.eval(script.getBytes(), ReturnType.BOOLEAN, 1, lockKey.getBytes(), value.getBytes());
+            return result;
+        });
     }
 }
 
